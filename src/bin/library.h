@@ -33,6 +33,7 @@
 #ifndef _SOFTHSM_V2_BIN_LIBRARY_H
 #define _SOFTHSM_V2_BIN_LIBRARY_H
 
+#include "pkcs11_compat.h"
 #include "pkcs11.h"
 
 CK_C_GetFunctionList loadLibrary(char* module, void** moduleHandle,

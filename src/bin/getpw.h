@@ -33,6 +33,7 @@
 #ifndef _SOFTHSM_V2_BIN_GETPW_H
 #define _SOFTHSM_V2_BIN_GETPW_H
 
+#include "pkcs11_compat.h"
 #include "pkcs11.h"
 
 void getPW(char* pin, char* newPIN, CK_ULONG userType);

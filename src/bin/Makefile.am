@@ -1,6 +1,6 @@
 MAINTAINERCLEANFILES =	$(srcdir)/Makefile.in
 
-AM_CPPFLAGS = 		-I$(srcdir)/cryptoki_compat
+AM_CPPFLAGS = 		-I$(srcdir)/pkcs11
 
 dist_man_MANS =		p11speed.1
 
@@ -13,6 +13,6 @@ p11speed_SOURCES =	p11speed.cpp \
 			library.cpp
 p11speed_LDADD =	-lpthread
 
-EXTRA_DIST =		$(srcdir)/cryptoki_compat/*.h \
+EXTRA_DIST =		$(srcdir)/pkcs11/*.h \
 			$(srcdir)/*.h \
 			$(srcdir)/*.cpp

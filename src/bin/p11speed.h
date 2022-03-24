@@ -34,12 +34,14 @@
 #ifndef _P11SPEED_H
 #define _P11SPEED_H
 
+#include "pkcs11_compat.h"
 #include "pkcs11.h"
 
 // Main functions
 void usage();
 int showSlots();
 int testSign(unsigned int slot, char* userPIN, char* mechanism, char* keysize, unsigned int threads, unsigned int iterations);
+int testKeyGen(unsigned int slot, char* userPIN, char* mechanism, char* keysize, unsigned int threads, unsigned int iterations);
 
 // Key generation
 int generateRsa(CK_SESSION_HANDLE hSession, CK_ULONG keysize, CK_OBJECT_HANDLE &hPuk, CK_OBJECT_HANDLE &hPrk);
@@ -49,6 +51,7 @@ int generateGost(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE &hPuk, CK_OBJECT_H
 
 // Work items for threads
 void* sign(void* arg);
+void* keygen(void* arg);
 
 // Logging
 void log_notice(const char* format, ...);
@@ -71,6 +74,17 @@ struct HashAlgo
                 GOST
         };
 };
+
+typedef struct {
+	unsigned int id;
+	unsigned int iterations;
+	unsigned int bits;
+	CK_SESSION_HANDLE hSession;
+	CK_OBJECT_HANDLE hPublicKey;
+	CK_OBJECT_HANDLE hPrivateKey;
+	CK_MECHANISM_TYPE mechanismType;
+	HashAlgo::Type hashType;
+} keygen_arg_t;
 
 typedef struct {
 	unsigned int id;

@@ -59,6 +59,9 @@ void usage()
 	printf("Action:\n");
 	printf("  -h                 Shows this help screen.\n");
 	printf("  --help             Shows this help screen.\n");
+	printf("  --keygen           Performe key generation test.\n");
+	printf("                     Use with --slot, --pin, --mechanism,\n");
+	printf("                     --keysize, --threads and --iterations\n");
 	printf("  --sign             Performe signature speed test.\n");
 	printf("                     Use with --slot, --pin, --mechanism,\n");
 	printf("                     --keysize, --threads and --iterations\n");
@@ -90,6 +93,7 @@ enum {
 	OPT_PIN,
 	OPT_SHOW_SLOTS,
 	OPT_SIGN,
+	OPT_KEYGEN,
 	OPT_SLOT,
 	OPT_THREADS,
 	OPT_VERSION
@@ -105,6 +109,7 @@ static const struct option long_options[] = {
 	{ "pin",             1, NULL, OPT_PIN },
 	{ "show-slots",      0, NULL, OPT_SHOW_SLOTS },
 	{ "sign",            0, NULL, OPT_SIGN },
+	{ "keygen",          0, NULL, OPT_KEYGEN },
 	{ "slot",            1, NULL, OPT_SLOT },
 	{ "threads",         1, NULL, OPT_THREADS },
 	{ "version",         0, NULL, OPT_VERSION },
@@ -130,6 +135,7 @@ int main(int argc, char* argv[])
 
 	int doShowSlots = 0;
 	int doSign = 0;
+	int doKeyGen = 0;
 	int action = 0;
 	int rv = 0;
 
@@ -146,6 +152,10 @@ int main(int argc, char* argv[])
 				break;
 			case OPT_SIGN:
 				doSign = 1;
+				action++;
+				break;
+			case OPT_KEYGEN:
+				doKeyGen = 1;
 				action++;
 				break;
 			case OPT_ITERATIONS:
@@ -216,6 +226,33 @@ int main(int argc, char* argv[])
 	{
 		rv = showSlots();
 	}
+
+	// Key Gen operation
+	if (doKeyGen)
+	{
+		if (slot == NULL)
+		{
+			log_error("A slot number must be supplied. "
+				  "Use --slot <number>\n");
+			return 1;
+		}
+		if (threads == NULL)
+		{
+			log_error("The number of threads must be supplied. "
+				  "Use --threads <number>\n");
+			return 1;
+		}
+		if (iterations == NULL)
+		{
+			log_error("The number of iterations must be supplied. "
+				  "Use --iterations <number>\n");
+			return 1;
+		}
+
+		rv = testKeyGen(atoi(slot), userPIN, mechanism, keysize,
+			      atoi(threads), atoi(iterations));
+	}
+
 
 	// Sign operation
 	if (doSign)
@@ -355,6 +392,233 @@ int showSlots()
 	return 0;
 }
 
+// Benchmark key generation operations
+int testKeyGen
+(
+	unsigned int slot,
+	char* userPIN,
+	char* mechanism,
+	char* keysize,
+	unsigned int threads,
+	unsigned int iterations
+)
+{
+	CK_RV rv;
+	CK_SESSION_HANDLE hSessionRW = CK_INVALID_HANDLE;
+	CK_SESSION_HANDLE hSessionRW2 = CK_INVALID_HANDLE;
+	CK_MECHANISM_TYPE mechanismType = CKM_VENDOR_DEFINED;
+	CK_OBJECT_HANDLE hPublicKey = CK_INVALID_HANDLE;
+	CK_OBJECT_HANDLE hPrivateKey = CK_INVALID_HANDLE;
+
+	char user_pin_copy[MAX_PIN_LEN+1];
+	keygen_arg_t keygen_arg_array[PTHREAD_THREADS_MAX];
+	pthread_t thread_array[PTHREAD_THREADS_MAX];
+	pthread_attr_t thread_attr;
+	void* thread_status;
+	unsigned int n, bits = 0;
+	static struct timeval start,end;
+	double elapsed, speed;
+	int result = 1;
+
+	if (mechanism == NULL)
+	{
+		log_error("A mechanism must be supplied. "
+			  "Use --mechanism <mech>\n");
+		return 1;
+	}
+
+	// Open read-write session
+	rv = p11->C_OpenSession((CK_SLOT_ID)slot, CKF_SERIAL_SESSION | CKF_RW_SESSION,
+				NULL_PTR, NULL_PTR, &hSessionRW);
+	if (rv != CKR_OK)
+	{
+		if (rv == CKR_SLOT_ID_INVALID)
+		{
+			log_error("The given slot does not exist.\n");
+		}
+		else if (rv == CKR_TOKEN_NOT_RECOGNIZED)
+		{
+			log_error("The token in the given slot has "
+				  "not been initialized.\n");
+		}
+		else
+		{
+			log_error("C_OpenSession() returned error: rv=0x%X\n",
+				  (unsigned int)rv);
+		}
+		return 1;
+	}
+
+	// Get the password
+	getPW(userPIN, user_pin_copy, CKU_USER);
+
+	// Login USER into the sessions so we can create private objects
+	rv = p11->C_Login(hSessionRW, CKU_USER, (CK_UTF8CHAR_PTR)user_pin_copy,
+			  strlen(user_pin_copy));
+	if (rv != CKR_OK)
+	{
+		if (rv == CKR_PIN_INCORRECT)
+		{
+			log_error("The given user PIN does not match "
+				  "the one in the token.\n");
+		}
+		else
+		{
+			log_error("C_Login() returned error: rv=0x%X\n",
+				  (unsigned int)rv);
+		}
+		return 1;
+	}
+
+	if (strcmp(mechanism, "RSA_PKCS") == 0)
+	{
+		if (keysize == NULL)
+		{
+			log_error("A key size must be supplied. "
+				  "Use --keysize <bits>\n");
+			return 1;
+		}
+
+		bits = atoi(keysize);
+		if (bits < 1024 || bits > 4096)
+		{
+			log_error("Invalid key size: "
+				  "%i [1024-4096]\n", bits);
+			return 1;
+		}
+
+		mechanismType = CKM_RSA_PKCS;
+	}
+	else if (strcmp(mechanism, "DSA") == 0)
+	{
+		if (keysize == NULL)
+		{
+			log_error("A key size must be supplied. "
+				  "Use --keysize <bits>\n");
+			return 1;
+		}
+
+		bits = atoi(keysize);
+		if (bits < 1024 || bits > 4096)
+		{
+			log_error("Invalid key size: "
+				  "%i [1024-4096]\n", bits);
+			return 1;
+		}
+
+		mechanismType = CKM_DSA;
+	}
+	else if (strcmp(mechanism, "ECDSA") == 0)
+	{
+		if (keysize == NULL)
+		{
+			log_error("A key size must be supplied. "
+				  "Use --keysize <bits>\n");
+			return 1;
+		}
+
+		bits = atoi(keysize);
+		if ((bits != 256) && (bits != 384))
+		{
+			log_error("Invalid key size: "
+				  "%i [256, 384]\n", bits);
+			return 1;
+		}
+
+		mechanismType = CKM_ECDSA;
+	}
+	else if (strcmp(mechanism, "GOSTR3410") == 0)
+	{
+		mechanismType = CKM_GOSTR3410;
+	}
+	else
+	{
+		log_error("Unknown signing mechanism. "
+			  "Please edit --mechanism <mech> to correct the error.\n");
+		return 1;
+	}
+
+	/* Prepare threads */
+	pthread_attr_init(&thread_attr);
+	pthread_attr_setdetachstate(&thread_attr, PTHREAD_CREATE_JOINABLE);
+
+
+	for (n=0; n<threads; n++)
+	{
+		rv = p11->C_OpenSession(slot, CKF_SERIAL_SESSION | CKF_RW_SESSION,
+                                NULL_PTR, NULL_PTR, &hSessionRW2);
+		if (rv != CKR_OK)
+		{
+			log_error("C_OpenSession() returned error: rv=0x%X\n",
+				  (unsigned int)rv);
+			return 1;
+		}
+
+		keygen_arg_array[n].id = n;
+		keygen_arg_array[n].iterations = iterations;
+		keygen_arg_array[n].bits = bits;
+		keygen_arg_array[n].hSession = hSessionRW2;
+		keygen_arg_array[n].hPublicKey = hPublicKey;
+		keygen_arg_array[n].hPrivateKey = hPrivateKey;
+		keygen_arg_array[n].mechanismType = mechanismType;
+	}
+
+	log_notice("Key generation started...\n");
+
+	log_notice("Creating %d %s key generation using %d %s...\n",
+		   iterations * threads, mechanism,
+		   threads, (threads > 1 ? "threads" : "thread"));
+	gettimeofday(&start, NULL);
+
+	/* Create threads for signing */
+	for (n=0; n<threads; n++)
+	{
+		result = pthread_create(&thread_array[n], &thread_attr,
+					keygen, (void *) &keygen_arg_array[n]);
+		if (result)
+		{
+			log_error("pthread_create() returned %d\n", result);
+			return 1;
+		}
+	}
+
+	/* Wait for threads to finish */
+	for (n=0; n<threads; n++)
+	{
+		result = pthread_join(thread_array[n], &thread_status);
+		if (result)
+		{
+			log_error("pthread_join() returned %d\n", result);
+			return 1;
+		}
+	}
+
+	gettimeofday(&end, NULL);
+
+	/* Report results */
+	end.tv_sec -= start.tv_sec;
+	end.tv_usec-= start.tv_usec;
+	elapsed =(double)(end.tv_sec)+(double)(end.tv_usec)*.000001;
+	speed = iterations / elapsed * threads;
+	if (bits)
+	{
+		printf("%d %s, %d keygen per thread, %.2f keygen/s (%s %i bits)\n",
+		       threads, (threads > 1 ? "threads" : "thread"), iterations,
+		       speed, mechanism, bits);
+	}
+	else
+	{
+		printf("%d %s, %d keygen per thread, %.2f keygen/s (%s)\n",
+		       threads, (threads > 1 ? "threads" : "thread"), iterations,
+		       speed, mechanism);
+	}
+
+	log_notice("Key generation done.\n");
+	return 0;
+}
+
+
+
 // Benchmark signing operations
 int testSign
 (
@@ -407,7 +671,7 @@ int testSign
 		}
 		else
 		{
-			log_error("C_OpenSession() returned error: rv=%X\n",
+			log_error("C_OpenSession() returned error: rv=0x%X\n",
 				  (unsigned int)rv);
 		}
 		return 1;
@@ -428,7 +692,7 @@ int testSign
 		}
 		else
 		{
-			log_error("C_Login() returned error: rv=%X\n",
+			log_error("C_Login() returned error: rv=0x%X\n",
 				  (unsigned int)rv);
 		}
 		return 1;
@@ -541,7 +805,7 @@ int testSign
 		rv = p11->C_OpenSession(slot, CKF_SERIAL_SESSION, NULL_PTR, NULL_PTR, &hSessionRO);
 		if (rv != CKR_OK)
 		{
-			log_error("C_OpenSession() returned error: rv=%X\n",
+			log_error("C_OpenSession() returned error: rv=0x%X\n",
 				  (unsigned int)rv);
 			return 1;
 		}
@@ -606,14 +870,14 @@ int testSign
 	rv = p11->C_DestroyObject(hSessionRW, hPublicKey);
 	if (rv != CKR_OK)
 	{
-		log_error("C_DestroyObject() returned error: rv=%X\n",
+		log_error("C_DestroyObject() returned error: rv=0x%X\n",
 			  (unsigned int)rv);
 		return 1;
 	}
 	rv = p11->C_DestroyObject(hSessionRW, hPrivateKey);
 	if (rv != CKR_OK)
 	{
-		log_error("C_DestroyObject() returned error: rv=%X\n",
+		log_error("C_DestroyObject() returned error: rv=0x%X\n",
 			  (unsigned int)rv);
 		return 1;
 	}
@@ -664,7 +928,7 @@ int generateRsa(CK_SESSION_HANDLE hSession, CK_ULONG keysize, CK_OBJECT_HANDLE &
 					  &hPuk, &hPrk);
 	if (rv != CKR_OK)
 	{
-		log_error("C_GenerateKeyPair() returned error: rv=%X\n",
+		log_error("C_GenerateKeyPair() returned error: rv=0x%X\n",
 			  (unsigned int)rv);
 		return 1;
 	}
@@ -727,7 +991,7 @@ int generateDsa(CK_SESSION_HANDLE hSession, CK_ULONG keysize, CK_OBJECT_HANDLE &
 				      &domainPar);
 	if (rv != CKR_OK)
 	{
-		log_error("C_GenerateKey() returned error: rv=%X\n",
+		log_error("C_GenerateKey() returned error: rv=0x%X\n",
 			  (unsigned int)rv);
 		return 1;
 	}
@@ -736,7 +1000,7 @@ int generateDsa(CK_SESSION_HANDLE hSession, CK_ULONG keysize, CK_OBJECT_HANDLE &
 				      pukAttribs, 3);
 	if (rv != CKR_OK)
 	{
-		log_error("C_GetAttributeValue() returned error: rv=%X\n",
+		log_error("C_GetAttributeValue() returned error: rv=0x%X\n",
 			  (unsigned int)rv);
 		return 1;
 	}
@@ -744,7 +1008,7 @@ int generateDsa(CK_SESSION_HANDLE hSession, CK_ULONG keysize, CK_OBJECT_HANDLE &
 	rv = p11->C_DestroyObject(hSession, domainPar);
 	if (rv != CKR_OK)
 	{
-		log_error("C_DestroyObject() returned error: rv=%X\n",
+		log_error("C_DestroyObject() returned error: rv=0x%X\n",
 			  (unsigned int)rv);
 		return 1;
 	}
@@ -755,7 +1019,7 @@ int generateDsa(CK_SESSION_HANDLE hSession, CK_ULONG keysize, CK_OBJECT_HANDLE &
 				    &hPuk, &hPrk);
 	if (rv != CKR_OK)
 	{
-		log_error("C_GenerateKeyPair() returned error: rv=%X\n",
+		log_error("C_GenerateKeyPair() returned error: rv=0x%X\n",
 			  (unsigned int)rv);
 		return 1;
 	}
@@ -823,7 +1087,7 @@ int generateEcdsa(CK_SESSION_HANDLE hSession, CK_ULONG keysize, CK_OBJECT_HANDLE
 					  &hPuk, &hPrk);
 	if (rv != CKR_OK)
 	{
-		log_error("C_GenerateKeyPair() returned error: rv=%X\n",
+		log_error("C_GenerateKeyPair() returned error: rv=0x%X\n",
 			  (unsigned int)rv);
 		return 1;
 	}
@@ -875,12 +1139,66 @@ int generateGost(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE &hPuk, CK_OBJECT_H
 					  &hPuk, &hPrk);
 	if (rv != CKR_OK)
 	{
-		log_error("C_GenerateKeyPair() returned error: rv=%X\n",
+		log_error("C_GenerateKeyPair() returned error: rv=0x%X\n",
 			  (unsigned int)rv);
 		return 1;
 	}
 
 	return 0;
+}
+
+void* keygen (void* arg)
+{
+	size_t i;
+	int result = 1;
+    keygen_arg_t* keygen_arg = (keygen_arg_t*)arg;
+	unsigned int id = keygen_arg->id;
+	unsigned int iterations = keygen_arg->iterations;
+	unsigned int bits = keygen_arg->bits;
+    CK_RV rv;
+	CK_SESSION_HANDLE hSession = keygen_arg->hSession;
+	CK_OBJECT_HANDLE hPublicKey = keygen_arg->hPublicKey;
+	CK_OBJECT_HANDLE hPrivateKey = keygen_arg->hPrivateKey;
+	CK_MECHANISM_TYPE mechanismType = keygen_arg->mechanismType;
+
+	for (i=0; i<iterations; i++) {
+
+        // Generate key
+        if (mechanismType == CKM_RSA_PKCS) {
+            result = generateRsa(hSession, bits, hPublicKey, hPrivateKey);
+        } else if (mechanismType == CKM_DSA) {
+            result = generateDsa(hSession, bits, hPublicKey, hPrivateKey);
+        } else if (mechanismType == CKM_ECDSA) {
+            result = generateEcdsa(hSession, bits, hPublicKey, hPrivateKey);
+        } else if (mechanismType == CKM_GOSTR3410) {
+            result = generateGost(hSession, hPublicKey, hPrivateKey);
+        } else {
+            log_error("Unknown signing mechanism. "
+                  "Please edit --mechanism <mech> to correct the error.\n");
+        }
+
+        if (result != 0) {
+            log_error("Unknown key generation result.\n");
+        } else {
+            // Remove key
+            rv = p11->C_DestroyObject(hSession, hPublicKey);
+            if (rv != CKR_OK)
+            {
+                log_error("C_DestroyObject() returned error: rv=0x%X\n",
+                      (unsigned int)rv);
+            }
+            rv = p11->C_DestroyObject(hSession, hPrivateKey);
+            if (rv != CKR_OK)
+            {
+                log_error("C_DestroyObject() returned error: rv=0x%X\n",
+                      (unsigned int)rv);
+            }
+        }
+    }
+
+    log_notice("Signer thread #%d done.\n", id);
+
+    pthread_exit(NULL);
 }
 
 void* sign (void* arg)
@@ -943,7 +1261,7 @@ void* sign (void* arg)
 		rv = p11->C_SignInit(hSession, &mechanism, hPrivateKey);
 		if (rv != CKR_OK)
 		{
-			log_error("C_SignInit() returned error: rv=%X\n",
+			log_error("C_SignInit() returned error: rv=0x%X\n",
 				  (unsigned int)rv);
 			break;
 		}
@@ -956,7 +1274,7 @@ void* sign (void* arg)
 				 &ulSignatureLen);
 		if (rv != CKR_OK)
 		{
-			log_error("C_Sign() returned error: rv=%X\n",
+			log_error("C_Sign() returned error: rv=0x%X\n",
 				  (unsigned int)rv);
 			break;
 		}
